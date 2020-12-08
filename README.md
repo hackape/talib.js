@@ -21,3 +21,9 @@ async function main() {
 
 main();
 ```
+
+## Documentation
+
+Visit https://hackape.github.io/ta-lib-wasm/
+
+Docs are generated using [typedoc](https://github.com/TypeStrong/typedoc) and hosted on [GitHub Pages](https://github.com/hackape/ta-lib-wasm/tree/gh-pages).
