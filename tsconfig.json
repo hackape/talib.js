@@ -1,0 +1,20 @@
+// This file is meant to be consumed by `typedoc`, not `tsc`
+// actual `tsc` options are specified in Makefile
+{
+  "compilerOptions": {
+    "module": "ES6",
+    "target": "ES6",
+    "outDir": "lib",
+    "removeComments": true,
+    "stripInternal": true
+  },
+  "files": ["./src/index.ts"],
+  "typedocOptions": {
+    "out": "docs",
+    "entryPoints": ["./src/index.ts"],
+    "theme": "minimal",
+    "hideGenerator": true,
+    "excludeExternals": true,
+    "categoryOrder": ["Initialization", "Price Transform", "Statistic Functions", "Volatility Indicators", "Volume Indicators", "Momentum Indicators", "Cycle Indicators", "Overlap Studies", "Pattern Recognition", "Math Operators", "Math Transform"]
+  }
+}

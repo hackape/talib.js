@@ -2,6 +2,7 @@ TA_SRC_DIR = src/ta-lib
 RELEASE_DIR = .temp/lib
 GET_EXPORTED_FUNCTIONS_SCRIPT = "console.log(['\'_malloc\'','\'_free\''].concat(require('./src/api.json').map(a=>'\'_TA_'+a.name+'\'')).join(','))"
 EXPORTED_FUNCTIONS = [$$(node -e $(GET_EXPORTED_FUNCTIONS_SCRIPT))]
+NODE_BIN = ./node_modules/.bin
 
 define UMD_HEAD
 (function (global, factory) {
@@ -18,7 +19,7 @@ emcc-template = $(TA_SRC_DIR)/src/ta_func/*.c $(TA_SRC_DIR)/src/ta_common/ta_glo
 		$(1) -s 'EXPORT_NAME="__INIT__"' -s MAIN_MODULE=2 \
 		-s "EXTRA_EXPORTED_RUNTIME_METHODS=['ccall']" -s "EXPORTED_FUNCTIONS=$(EXPORTED_FUNCTIONS)" -Oz -o $(RELEASE_DIR)/$(2)
 
-all: build
+all: build docs
 
 # The trick is to emit ES6 module, then remove last line
 # Also insert a "use strict" directive to the first line
@@ -29,7 +30,7 @@ all: build
 	emcc $(call emcc-template,-s SINGLE_FILE=0 -s WASM=1 -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=0,ta-lib.js); \
 	echo "emcc: compile $@ took $$(($$(date +%s)-d)) seconds"
 	@mv $(RELEASE_DIR)/ta-lib.js $(RELEASE_DIR)/ta-lib.bak.js
-	@sed -e '1s/^/"use strict";/' -e '$$ d' $(RELEASE_DIR)/ta-lib.bak.js | prettier --no-config --parser babel > $(RELEASE_DIR)/ta-lib.js
+	@sed -e '1s/^/"use strict";/' -e '$$ d' $(RELEASE_DIR)/ta-lib.bak.js | $(NODE_BIN)/prettier --no-config --parser babel > $(RELEASE_DIR)/ta-lib.js
 
 .temp/lib/ta-lib.bundle.js:
 	@echo "emcc: compiling $@"
@@ -66,14 +67,21 @@ lib/index.umd.js: mkdir-lib lib/index.cjs.js
 	@echo "$$UMD_HEAD" | cat - lib/index.cjs.js > lib/index.umd.js
 	@echo "\n})" >> lib/index.umd.js
 
+lib/index.d.ts: mkdir-lib src/index.ts
+	@tsc src/index.ts --module es2015 --target ES6 --declaration --emitDeclarationOnly --outDir lib
+
 lib/ta-lib.wasm: mkdir-lib .temp/lib/ta-lib.js
 	@cp .temp/lib/ta-lib.wasm lib/ta-lib.wasm
 
-build: lib/index.esm.js lib/index.cjs.js lib/index.umd.js lib/ta-lib.wasm
+build: lib/index.esm.js lib/index.cjs.js lib/index.umd.js lib/ta-lib.wasm lib/index.d.ts
+
+docs:
+	$(NODE_BIN)/typedoc
 
 clean:
 	rm -rf .temp
 	rm -rf lib
+	rm -rf docs
 	rm src/index.ts
 
-.PHONY: all mkdir-lib build clean
+.PHONY: all mkdir-lib build docs clean

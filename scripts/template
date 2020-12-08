@@ -208,7 +208,7 @@ export enum MAType {
  * EMA(...);
  * ```
  *
- * In case you want to directly interact with the emscripten wasm Module API,
+ * In case you want to directly interact with the emscripten wasm [Module API](https://emscripten.org/docs/api_reference/module.html),
  * just obtain the `Module` object from the promise.
  * ```
  * const Module = await init()
