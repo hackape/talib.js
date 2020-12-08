@@ -77,6 +77,7 @@ build: lib/index.esm.js lib/index.cjs.js lib/index.umd.js lib/ta-lib.wasm lib/in
 
 docs:
 	$(NODE_BIN)/typedoc
+	touch docs/.nojekyll
 
 clean:
 	rm -rf .temp
