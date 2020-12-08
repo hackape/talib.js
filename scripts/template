@@ -1,0 +1,248 @@
+// initialize wasm module
+
+/** @internal */
+var __INIT__: (m: any) => Promise<any> = __INIT__;
+
+/** @internal */
+let TA_WASM: any;
+
+/** @internal */
+function cArray(Module: any, size: number) {
+  const offset = Module._malloc(size * 8);
+  Module.HEAPF64.set(new Float64Array(size), offset / 8);
+  return {
+    data: Module.HEAPF64.subarray(offset / 8, offset / 8 + size),
+    offset: offset,
+  };
+}
+
+/** @internal */
+const TA_RET_CODE = {
+  0: 'TA_SUCCESS',
+  1: 'TA_LIB_NOT_INITIALIZE',
+  2: 'TA_BAD_PARAM',
+  3: 'TA_ALLOC_ERR',
+  4: 'TA_GROUP_NOT_FOUND',
+  5: 'TA_FUNC_NOT_FOUND',
+  6: 'TA_INVALID_HANDLE',
+  7: 'TA_INVALID_PARAM_HOLDER',
+  8: 'TA_INVALID_PARAM_HOLDER_TYPE',
+  9: 'TA_INVALID_PARAM_FUNCTION',
+  10: 'TA_INPUT_NOT_ALL_INITIALIZE',
+  11: 'TA_OUTPUT_NOT_ALL_INITIALIZE',
+  12: 'TA_OUT_OF_RANGE_START_INDEX',
+  13: 'TA_OUT_OF_RANGE_END_INDEX',
+  14: 'TA_INVALID_LIST_TYPE',
+  15: 'TA_BAD_OBJECT',
+  16: 'TA_NOT_SUPPORTED',
+  5000: 'TA_INTERNAL_ERROR',
+  [0xffff]: 'TA_UNKNOWN_ERR',
+};
+
+/** @internal */
+type APIDescriptor = {
+  name: string;
+  camelCaseName: string;
+  group: string;
+  description: string;
+  inputs: {
+    name: string;
+    type: string;
+  }[];
+  options: {
+    name: string;
+    displayName: string;
+    defaultValue: number;
+    hint: string;
+    type: string;
+    range?: {
+      min: number;
+      max: number;
+    };
+  }[];
+  outputs: {
+    name: string;
+    type: string;
+    plotHint: string;
+  }[];
+};
+
+/** @internal */
+function callFunc(api: APIDescriptor, params: any): any {
+  const funcIdent = `TA_${api.name}`;
+  if (!TA_WASM) throw Error(`${api.name}() called before initialization.`);
+
+  // prettier-ignore
+  const ccallArgsLen =
+    2 /* startIdx, endIdx */ + 
+    api.inputs.length + 
+    api.options.length + 
+    2 /* outBegIdx, outNBElement */ + 
+    api.outputs.length;
+
+  const argTypesToCcall = new Array(ccallArgsLen).fill('number');
+
+  /**
+   * Input params validation
+   */
+  for (const { name } of api.inputs) {
+    if (!Array.isArray(params[name])) {
+      if (params[name] === undefined)
+        throw Error(`Bad Param: "${name}" is required`);
+      throw Error(`Bad Param: "${name}" should be array of number`);
+    }
+  }
+
+  for (const { name, defaultValue, range } of api.options) {
+    if (params[name] === undefined) {
+      params[name] = defaultValue;
+    } else if (
+      range &&
+      (params[name] < range.min || params[name] > range.max)
+    ) {
+      throw Error(
+        `Bad Param: "${name}" out of range (min: ${range.min}, max: ${range.max})`
+      );
+    }
+  }
+
+  let { startIdx, endIdx } = params;
+  if (startIdx === undefined) startIdx = 0;
+  const reqParamsLen = api.inputs.map(({ name }) => params[name].length);
+  if (endIdx === undefined) {
+    // endIdx safely set to the min of all input arrays
+    endIdx = Math.min(...reqParamsLen) - 1;
+  }
+
+  /**
+   * Constructing `argsToCcall` to pass to the `Module.ccall` API
+   * Move things from `params` onto `argsToCcall`
+   *
+   * TA-Lib function signatures are of following form:
+   * ```
+   * FUNC(startIdx, endIdx, ...params, outBegIdx, outNBElement, ...outputs)
+   * ```
+   */
+  const argsToCcall = [startIdx, endIdx];
+  const arraysToRelease = [];
+
+  api.inputs.forEach(({ name }) => {
+    const argArray = cArray(TA_WASM, endIdx - startIdx);
+    /** @type {number[]} */
+    const paramArray = params[name];
+    for (const i in paramArray) argArray.data[i] = paramArray[i];
+    arraysToRelease.push(argArray);
+    argsToCcall.push(argArray.offset);
+  });
+
+  api.options.forEach(({ name }) => argsToCcall.push(params[name]));
+
+  argsToCcall.push(0); // outBegIdx
+  argsToCcall.push(0); // outNBElement
+
+  const outputs = api.outputs.map(({ name }) => {
+    const argArray = cArray(TA_WASM, endIdx - startIdx);
+    arraysToRelease.push(argArray);
+    argsToCcall.push(argArray.offset);
+    return { name, array: argArray };
+  });
+
+  const retCode = TA_WASM.ccall(
+    funcIdent,
+    'number' /* TA_RET_CODE */,
+    argTypesToCcall,
+    argsToCcall
+  );
+  arraysToRelease.forEach((arr) => TA_WASM._free(arr.offset));
+
+  const result = outputs.reduce((result, current) => {
+    result[current.name] = Array.from(current.array.data);
+    return result;
+  }, {});
+
+  if (retCode === 0) {
+    // success
+    return result;
+  } else {
+    throw Error('[C_ERROR] ' + TA_RET_CODE[retCode]);
+  }
+}
+
+// ======================
+// Public API exports
+// ======================
+
+// prettier-ignore
+/**
+ * The `MAType` enum to be passed to some of the functions
+ */
+export enum MAType {
+  SMA   = 0,
+  EMA   = 1,
+  WMA   = 2,
+  DEMA  = 3,
+  TEMA  = 4,
+  TRIMA = 5,
+  KAMA  = 6,
+  MAMA  = 7,
+  T3    = 8,
+}
+
+/**
+ * ## Initialize wasm module
+ *
+ * To use the lib, you must first call `init()` to load and compile the wasm binary file in the JS runtime.
+ * Because of the async nature of wasm binary loading/compilation process,
+ * you must wait until the compilation complete before calling any functions.
+ *
+ * `init()` is idempotent, that means calling it multiple times will NOT re-initialize
+ * or create new instance of the wasm module.
+ *
+ * ### Usage
+ *
+ * Normally you would just want to be notified when ready:
+ * ```
+ * import { init, EMA } from 'ta-lib-wasm';
+ *
+ * await init();
+ * EMA(...);
+ * ```
+ *
+ * In case you want to directly interact with the emscripten wasm Module API,
+ * just obtain the `Module` object from the promise.
+ * ```
+ * const Module = await init()
+ * Module.ccall(...)
+ * Module._malloc(...)
+ * Module.HEAPF64
+ * ```
+ *
+ * @category Initialization
+ * @param wasmBinaryFilePath - optional, a string that specifies the location of wasm binary file
+ * @returns A promise that resolves to the emscripten runtime `Module` object. See {@link https://emscripten.org/docs/api_reference/module.html}.
+ */
+export function init(wasmBinaryFilePath?: string) {
+  if (TA_WASM) return Promise.resolve(TA_WASM);
+
+  if (wasmBinaryFilePath && typeof wasmBinaryFilePath !== 'string') {
+    return Promise.reject(
+      new Error(
+        'Invalid argument, "init(wasmBinaryFilePath)" expects a string that specifies the location of wasm binary file'
+      )
+    );
+  }
+
+  const locateFile = wasmBinaryFilePath ? () => wasmBinaryFilePath : undefined;
+  return __INIT__({ locateFile })
+    .then((Module) => (TA_WASM = Module))
+    .catch((e) => {
+      let message = 'TA-Lib WASM runtime init fail.';
+      if (e && e.message) {
+        message += '\nError: \n' + e.message;
+      } else {
+        message +=
+          'Unknown reason. Perhaps you specify the wrong file path to wasm binary?';
+      }
+      throw new Error(message);
+    });
+}
