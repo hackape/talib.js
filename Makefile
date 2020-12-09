@@ -23,20 +23,20 @@ all: build docs
 
 # The trick is to emit ES6 module, then remove last line
 # Also insert a "use strict" directive to the first line
-.temp/lib/ta-lib.js:
+.temp/lib/talib.js:
 	@echo "emcc: compiling $@"
 	@d=$$(date +%s); \
 	mkdir -p $(RELEASE_DIR); \
-	emcc $(call emcc-template,-s SINGLE_FILE=0 -s WASM=1 -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=0,ta-lib.js); \
+	emcc $(call emcc-template,-s SINGLE_FILE=0 -s WASM=1 -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=0,talib.js); \
 	echo "emcc: compile $@ took $$(($$(date +%s)-d)) seconds"
-	@mv $(RELEASE_DIR)/ta-lib.js $(RELEASE_DIR)/ta-lib.bak.js
-	@sed -e '1s/^/"use strict";/' -e '$$ d' $(RELEASE_DIR)/ta-lib.bak.js | $(NODE_BIN)/prettier --no-config --parser babel > $(RELEASE_DIR)/ta-lib.js
+	@mv $(RELEASE_DIR)/talib.js $(RELEASE_DIR)/talib.bak.js
+	@sed -e '1s/^/"use strict";/' -e '$$ d' $(RELEASE_DIR)/talib.bak.js | $(NODE_BIN)/prettier --no-config --parser babel > $(RELEASE_DIR)/talib.js
 
-.temp/lib/ta-lib.bundle.js:
+.temp/lib/talib.bundle.js:
 	@echo "emcc: compiling $@"
 	@d=$$(date +%s); \
 	mkdir -p $(RELEASE_DIR); \
-	emcc $(call emcc-template,-s SINGLE_FILE=1 -s WASM=1 -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=0,ta-lib.bundle.js) && sed -e '1s/^/"use strict";/' -e '$$ d' -i '' $(RELEASE_DIR)/ta-lib.bundle.js; \
+	emcc $(call emcc-template,-s SINGLE_FILE=1 -s WASM=1 -s MODULARIZE=1 -s EXPORT_ES6=1 -s USE_ES6_IMPORT_META=0,talib.bundle.js) && sed -e '1s/^/"use strict";/' -e '$$ d' -i '' $(RELEASE_DIR)/talib.bundle.js; \
 	echo "emcc: compile $@ took $$(($$(date +%s)-d)) seconds"
 
 src/index.ts:
@@ -56,11 +56,11 @@ src/index.ts:
 mkdir-lib:
 	@mkdir -p lib/
 
-lib/index.esm.js: mkdir-lib .temp/lib/ta-lib.js .temp/esm/index.js
-	@cat .temp/lib/ta-lib.js .temp/esm/index.js > lib/index.esm.js
+lib/index.esm.js: mkdir-lib .temp/lib/talib.js .temp/esm/index.js
+	@cat .temp/lib/talib.js .temp/esm/index.js > lib/index.esm.js
 
-lib/index.cjs.js: mkdir-lib .temp/lib/ta-lib.js .temp/cjs/index.js
-	@cat .temp/lib/ta-lib.js .temp/cjs/index.js > lib/index.cjs.js
+lib/index.cjs.js: mkdir-lib .temp/lib/talib.js .temp/cjs/index.js
+	@cat .temp/lib/talib.js .temp/cjs/index.js > lib/index.cjs.js
 
 lib/index.umd.js: mkdir-lib lib/index.cjs.js
 	@mkdir -p lib
@@ -70,10 +70,10 @@ lib/index.umd.js: mkdir-lib lib/index.cjs.js
 lib/index.d.ts: mkdir-lib src/index.ts
 	@tsc src/index.ts --module es2015 --target ES6 --declaration --emitDeclarationOnly --outDir lib
 
-lib/ta-lib.wasm: mkdir-lib .temp/lib/ta-lib.js
-	@cp .temp/lib/ta-lib.wasm lib/ta-lib.wasm
+lib/talib.wasm: mkdir-lib .temp/lib/talib.js
+	@cp .temp/lib/talib.wasm lib/talib.wasm
 
-build: lib/index.esm.js lib/index.cjs.js lib/index.umd.js lib/ta-lib.wasm lib/index.d.ts
+build: lib/index.esm.js lib/index.cjs.js lib/index.umd.js lib/talib.wasm lib/index.d.ts
 
 docs:
 	$(NODE_BIN)/typedoc

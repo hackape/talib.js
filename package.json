@@ -1,14 +1,14 @@
 {
-  "name": "ta-lib-wasm",
+  "name": "talib.js",
   "version": "0.1.0",
   "description": "TA-Lib C code ported to WebAssembly",
   "license": "BSD-3-Clause",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hackape/ta-lib-wasm.git"
+    "url": "https://github.com/hackape/talib.js.git"
   },
-  "bugs": "https://github.com/hackape/ta-lib-wasm/issues",
-  "homepage": "https://hackape.github.io/ta-lib-wasm/",
+  "bugs": "https://github.com/hackape/talib.js/issues",
+  "homepage": "https://hackape.github.io/talib.js/",
   "author": "hackape",
   "main": "./lib/index.cjs.js",
   "module": "./lib/index.esm.js",
@@ -38,5 +38,10 @@
     "quantitative",
     "finance",
     "stocks"
+  ],
+  "files": [
+    "lib/*",
+    "LICENSE",
+    "README.md"
   ]
 }

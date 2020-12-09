@@ -209,7 +209,7 @@ export enum MAType {
  *
  * Normally you would just want to be notified when ready:
  * ```
- * import { init, EMA } from 'ta-lib-wasm';
+ * import { init, EMA } from 'talib.js';
  *
  * await init();
  * EMA(...);
