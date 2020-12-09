@@ -22,7 +22,7 @@
   },
   "scripts": {
     "build": "make",
-    "gh-pages": "node -e \"require('gh-pages').publish('docs').then(() => console.log('docs published'))\""
+    "gh-pages": "gh-pages -d docs -t"
   },
   "keywords": [
     "talib",
