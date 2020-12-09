@@ -1,0 +1,43 @@
+<html>
+<head>
+<title>In Browser Usage</title>
+<style>
+/**
+  * These CSS shows how the quine trick is done.
+  * Not relevent to the usage, just ignore them.
+  */
+* {display:block;margin:0;font-family:Monospace}
+body,style,script {white-space: pre-wrap}
+html,body,script {display:inline-block} html {padding-left: 0.5em}
+html::before {content:'<html>'} html::after {content:'</html>';display:block}
+head::before {content:'<head>'} head::after {content:'</head>'}
+title::before {content:'<title>'} title::after {content:'</title>'}
+body::before {content:'<body>'} body::after {content:'</body>\A'}
+script::before {content:'<script>'} script::after {content:'</script>'}
+body > script[src]::before {content:'<script src="https://unpkg.com/talib.js/lib/index.umd.js">'}
+style::before {content:'<style>'} style::after {content:'<\/style>'}
+a {display:inline-block} a[href]::before {content: "<a href='"attr(href)"' target='_blank'>"} a::after {content:"</a>"} 
+</style>
+</head>
+<body>
+
+# In browser usage, as an HTML <a href='https://en.wikipedia.org/wiki/Quine_(computing)' target='_blank'>quine</a>.
+
+1. Import the script:
+<script src="https://unpkg.com/talib.js/lib/index.umd.js"></script>
+
+2. UMD module exports `TA_LIB` global namespace
+   Open the browser console to inspect result.
+<script>
+  const talib = window.TA_LIB;
+  const inReal = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+  async function main() {
+    await talib.init();
+    console.log('talib.ADD result:', talib.ADD({ inReal0: inReal, inReal1: inReal }));
+  }
+
+  main();
+</script>
+</body>
+</html>
