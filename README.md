@@ -35,3 +35,18 @@ output:
 Visit https://hackape.github.io/talib.js/
 
 Docs are generated using [typedoc](https://github.com/TypeStrong/typedoc) and hosted on [GitHub Pages](https://github.com/hackape/talib.js/tree/gh-pages).
+
+
+## Develop
+
+[emscripten installion](https://emscripten.org/docs/getting_started/downloads.html)
+
+```sh
+npm install typescript -g
+```
+
+**troubleshooting:**
+
+- `error while loading shared libraries: libatomic.so.1: cannot open shared obj`
+
+	run command: `yum -y install libatomic`
