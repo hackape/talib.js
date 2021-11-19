@@ -88,12 +88,12 @@ function genCodeAllFunc() {
 	for (const key in allFuncName) {
 		if (Object.hasOwnProperty.call(allFuncName, key)) {
 			const item = allFuncName[key];
-			 res.push(`${key} : ${item}`);
+			res.push(`"${key}": ${item}`);
 		}
 	}
-	return `\nexport const TA = {${res.join(",")}}`;
+	return `\n\n//TA object is a collection of all functions.\nexport const TA = {${res.join(",")}}`;
 }
 
-const generatedCode = staticCode + API.map(genCode).join('\n') + "\n\n//xxx start" +genCodeAllFunc() + "//xxx end";
+const generatedCode = staticCode + API.map(genCode).join('\n') + genCodeAllFunc();
 
 fs.writeFileSync(path.resolve(__dirname, '../src/index.ts'), generatedCode);
