@@ -77,10 +77,23 @@ ${__INPS__.join('\n')}${__OPTS__.length ? '\n' : ''}${__OPTS__.join('\n')}
 /** @hidden */
 export const ${desc.camelCaseName} = ${FUNC_NAME};
 `;
-
+  allFuncName[FUNC_NAME] = FUNC_NAME;
   return code;
 }
 
-const generatedCode = staticCode + API.map(genCode).join('\n');
+let allFuncName = {};
+
+function genCodeAllFunc() {
+	let res = [];
+	for (const key in allFuncName) {
+		if (Object.hasOwnProperty.call(allFuncName, key)) {
+			const item = allFuncName[key];
+			 res.push(`${key} : ${item}`);
+		}
+	}
+	return `\nexport const TA = {${res.join(",")}}`;
+}
+
+const generatedCode = staticCode + API.map(genCode).join('\n') + "\n\n//xxx start" +genCodeAllFunc() + "//xxx end";
 
 fs.writeFileSync(path.resolve(__dirname, '../src/index.ts'), generatedCode);

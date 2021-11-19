@@ -17,7 +17,7 @@ export UMD_HEAD
 emcc-template = $(TA_SRC_DIR)/src/ta_func/*.c $(TA_SRC_DIR)/src/ta_common/ta_global.c \
 		-I $(TA_SRC_DIR)/include/ -I $(TA_SRC_DIR)/src/ta_common/ \
 		$(1) -s 'EXPORT_NAME="__INIT__"' -s MAIN_MODULE=2 \
-		-s "EXTRA_EXPORTED_RUNTIME_METHODS=['ccall']" -s "EXPORTED_FUNCTIONS=$(EXPORTED_FUNCTIONS)" -Oz -o $(RELEASE_DIR)/$(2)
+		-s "EXPORTED_RUNTIME_METHODS=['ccall']" -s "EXPORTED_FUNCTIONS=$(EXPORTED_FUNCTIONS)" -Oz -o $(RELEASE_DIR)/$(2)
 
 all: build docs
 
