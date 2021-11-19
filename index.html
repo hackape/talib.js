@@ -1,0 +1,30 @@
+<html>
+	<body>
+		
+		<script>
+
+let aa = 22;
+let bb = 33;
+
+		let allFuncName = {
+			a: aa,
+			b: bb
+		};
+
+function genCodeAllFunc() {
+	let res = [];
+	for (const key in allFuncName) {
+		if (Object.hasOwnProperty.call(allFuncName, key)) {
+			const item = allFuncName[key];
+			 res.push(`${key} : ${item}`);
+		}
+	}
+	return `\nexport const TA = {${res}}`;
+}
+
+
+	let res =	genCodeAllFunc();
+	console.log(res);
+		</script>
+	</body>
+</html>
