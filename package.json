@@ -21,8 +21,11 @@
     "typescript": "^4.1.2"
   },
   "scripts": {
-    "build": "make",
-    "gh-pages": "gh-pages -d docs -t"
+    "build": "npm run clean-all && make",
+    "build-js": "npm run clean-js && make",
+    "gh-pages": "gh-pages -d docs -t",
+    "clean-js": "rm src/index.ts .temp/esm/*.js .temp/cjs/*.js lib/*.js lib/*.ts",
+    "clean-all": "rm -rf src/index.ts .temp lib"
   },
   "keywords": [
     "talib",

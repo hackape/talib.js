@@ -17,9 +17,9 @@ export UMD_HEAD
 emcc-template = $(TA_SRC_DIR)/src/ta_func/*.c $(TA_SRC_DIR)/src/ta_common/ta_global.c \
 		-I $(TA_SRC_DIR)/include/ -I $(TA_SRC_DIR)/src/ta_common/ \
 		$(1) -s 'EXPORT_NAME="__INIT__"' -s MAIN_MODULE=2 \
-		-s "EXTRA_EXPORTED_RUNTIME_METHODS=['ccall']" -s "EXPORTED_FUNCTIONS=$(EXPORTED_FUNCTIONS)" -Oz -o $(RELEASE_DIR)/$(2)
+		-s "EXPORTED_RUNTIME_METHODS=ccall,setValue,getValue" -s "EXPORTED_FUNCTIONS=$(EXPORTED_FUNCTIONS)" -Oz -o $(RELEASE_DIR)/$(2)
 
-all: build docs
+all: build
 
 # The trick is to emit ES6 module, then remove last line
 # Also insert a "use strict" directive to the first line
@@ -31,6 +31,7 @@ all: build docs
 	echo "emcc: compile $@ took $$(($$(date +%s)-d)) seconds"
 	@mv $(RELEASE_DIR)/talib.js $(RELEASE_DIR)/talib.bak.js
 	@sed -e '1s/^/"use strict";/' -e '$$ d' $(RELEASE_DIR)/talib.bak.js | $(NODE_BIN)/prettier --no-config --parser babel > $(RELEASE_DIR)/talib.js
+	@rm $(RELEASE_DIR)/talib.bak.js
 
 .temp/lib/talib.bundle.js:
 	@echo "emcc: compiling $@"
