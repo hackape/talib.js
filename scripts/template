@@ -1,19 +1,74 @@
 // initialize wasm module
 
 /** @internal */
-var __INIT__: (m: any) => Promise<any> = __INIT__;
+declare var __INIT__: (m: any) => Promise<IWasmModule>;
+
+/** @interal */
+const enum ByteSize {
+  i8 = 1,
+  i16 = 2,
+  i32 = 4,
+  i64 = 8,
+  float = 4,
+  double = 8,
+}
 
 /** @internal */
-let TA_WASM: any;
+type IWasmCTypes = 'i1' | 'i8' | 'i16' | 'i32' | 'i64' | 'float' | 'double';
 
 /** @internal */
-function cArray(Module: any, size: number) {
-  const offset = Module._malloc(size * 8);
-  Module.HEAPF64.set(new Float64Array(size), offset / 8);
+interface IWasmModule {
+  _malloc(size: number): number;
+  _free(offset: number): void;
+  HEAP8: Int8Array;
+  HEAP16: Int16Array;
+  HEAP32: Int32Array;
+  HEAPU8: Uint8Array;
+  HEAPU16: Uint16Array;
+  HEAPU32: Uint32Array;
+  HEAPF32: Float32Array;
+  HEAPF64: Float64Array;
+  ccall(
+    funcIdent: string,
+    retCodeType: string,
+    argTypes: any[],
+    args: any[]
+  ): number;
+  setValue(ptr: number, value: number, type: IWasmCTypes): void;
+  getValue(ptr: number, type: IWasmCTypes): number;
+}
+
+/** @internal */
+let Module: IWasmModule;
+
+/** @internal */
+function double_array(size: number) {
+  const BYTE_SIZE = ByteSize.double;
+  const offset = Module._malloc(size * BYTE_SIZE);
+  const offsetF64 = offset / BYTE_SIZE;
+  Module.HEAPF64.set(new Float64Array(size), offsetF64);
   return {
-    data: Module.HEAPF64.subarray(offset / 8, offset / 8 + size),
-    offset: offset,
+    data: Module.HEAPF64.subarray(offsetF64, offsetF64 + size),
+    pointer: offset,
   };
+}
+
+/** @internal */
+function c_pointer(type: IWasmCTypes, initValue?: number) {
+  const offset = Module._malloc(ByteSize.i32);
+  const ref = {
+    get data() {
+      return Module.getValue(offset, type);
+    },
+    set data(val: number) {
+      Module.setValue(offset, val, type);
+    },
+    pointer: offset,
+  };
+  if (initValue !== undefined) {
+    ref.data = initValue;
+  }
+  return ref;
 }
 
 /** @internal */
@@ -38,6 +93,10 @@ const TA_RET_CODE = {
   5000: 'TA_INTERNAL_ERROR',
   [0xffff]: 'TA_UNKNOWN_ERR',
 };
+
+// src/ta-lib/include/ta_defs.h:213
+/** @internal */
+const TA_INTEGER_DEFAULT = -2147483648;
 
 /** @internal */
 type APIDescriptor = {
@@ -70,7 +129,7 @@ type APIDescriptor = {
 /** @internal */
 function callFunc(api: APIDescriptor, params: any): any {
   const funcIdent = `TA_${api.name}`;
-  if (!TA_WASM) throw Error(`${api.name}() called before initialization.`);
+  if (!Module) throw Error(`${api.name}() called before initialization.`);
 
   // prettier-ignore
   const ccallArgsLen =
@@ -80,7 +139,7 @@ function callFunc(api: APIDescriptor, params: any): any {
     2 /* outBegIdx, outNBElement */ + 
     api.outputs.length;
 
-  const argTypesToCcall = new Array(ccallArgsLen).fill('number');
+  const argTypes = new Array(ccallArgsLen).fill('number');
 
   /**
    * Input params validation
@@ -93,9 +152,9 @@ function callFunc(api: APIDescriptor, params: any): any {
     }
   }
 
-  for (const { name, defaultValue, range } of api.options) {
+  for (const { name, range } of api.options) {
     if (params[name] === undefined) {
-      params[name] = defaultValue;
+      params[name] = TA_INTEGER_DEFAULT;
     } else if (
       range &&
       (params[name] < range.min || params[name] > range.max)
@@ -115,50 +174,62 @@ function callFunc(api: APIDescriptor, params: any): any {
   }
 
   /**
-   * Constructing `argsToCcall` to pass to the `Module.ccall` API
-   * Move things from `params` onto `argsToCcall`
+   * Constructing `args` to pass to the `Module.ccall` API
+   * Move things from `params` onto `args`
    *
    * TA-Lib function signatures are of following form:
    * ```
    * FUNC(startIdx, endIdx, ...params, outBegIdx, outNBElement, ...outputs)
    * ```
    */
-  const argsToCcall = [startIdx, endIdx];
-  const arraysToRelease = [];
+  const args = [startIdx, endIdx];
+  const memToFree = [];
 
   api.inputs.forEach(({ name }) => {
-    const argArray = cArray(TA_WASM, endIdx - startIdx);
+    const argArray = double_array(endIdx - startIdx);
     /** @type {number[]} */
     const paramArray = params[name];
     for (const i in paramArray) argArray.data[i] = paramArray[i];
-    arraysToRelease.push(argArray);
-    argsToCcall.push(argArray.offset);
+    memToFree.push(argArray.pointer);
+    args.push(argArray.pointer);
   });
 
-  api.options.forEach(({ name }) => argsToCcall.push(params[name]));
+  api.options.forEach(({ name }) => args.push(params[name]));
 
-  argsToCcall.push(0); // outBegIdx
-  argsToCcall.push(0); // outNBElement
+  const outBegIdxRef = c_pointer('i32', 0);
+  const outNBElementRef = c_pointer('i32', 0);
+  memToFree.push(outBegIdxRef.pointer);
+  memToFree.push(outNBElementRef.pointer);
+  args.push(outBegIdxRef.pointer);
+  args.push(outNBElementRef.pointer);
 
   const outputs = api.outputs.map(({ name }) => {
-    const argArray = cArray(TA_WASM, endIdx - startIdx);
-    arraysToRelease.push(argArray);
-    argsToCcall.push(argArray.offset);
+    const argArray = double_array(endIdx - startIdx);
+    memToFree.push(argArray.pointer);
+    args.push(argArray.pointer);
     return { name, array: argArray };
   });
 
-  const retCode = TA_WASM.ccall(
+  const retCode = Module.ccall(
     funcIdent,
     'number' /* TA_RET_CODE */,
-    argTypesToCcall,
-    argsToCcall
+    argTypes,
+    args
   );
-  arraysToRelease.forEach((arr) => TA_WASM._free(arr.offset));
 
-  const result = outputs.reduce((result, current) => {
-    result[current.name] = Array.from(current.array.data);
-    return result;
-  }, {});
+  const outBegIdx = outBegIdxRef.data;
+  const outNBElement = outNBElementRef.data;
+
+  const result = outputs.reduce(
+    (result, current) => {
+      const data = Array.from(current.array.data.slice(0, outNBElement));
+      result[current.name] = data;
+      return result;
+    },
+    { outBegIdx, outNBElement }
+  );
+
+  memToFree.forEach((offset) => Module._free(offset));
 
   if (retCode === 0) {
     // success
@@ -221,8 +292,8 @@ export enum MAType {
  * @param wasmBinaryFilePath - optional, a string that specifies the location of wasm binary file
  * @returns A promise that resolves to the emscripten runtime `Module` object. See {@link https://emscripten.org/docs/api_reference/module.html}.
  */
-export function init(wasmBinaryFilePath?: string) {
-  if (TA_WASM) return Promise.resolve(TA_WASM);
+export function init(wasmBinaryFilePath?: string): Promise<IWasmModule> {
+  if (Module) return Promise.resolve(Module);
 
   if (wasmBinaryFilePath && typeof wasmBinaryFilePath !== 'string') {
     return Promise.reject(
@@ -234,7 +305,7 @@ export function init(wasmBinaryFilePath?: string) {
 
   const locateFile = wasmBinaryFilePath ? () => wasmBinaryFilePath : undefined;
   return __INIT__({ locateFile })
-    .then((Module) => (TA_WASM = Module))
+    .then((m) => (Module = m))
     .catch((e) => {
       let message = 'TA-Lib WASM runtime init fail.';
       if (e && e.message) {

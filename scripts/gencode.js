@@ -57,7 +57,9 @@ function genCode(desc) {
   });
 
   const __OUTS__ =
-    '{ ' + desc.outputs.map((o) => `${o.name}: number[]`).join('; ') + ' }';
+    '{ outBegIdx: number; outNBElement: number; ' +
+    desc.outputs.map((o) => `${o.name}: number[];`).join(' ') +
+    ' }';
 
   // prettier-ignore
   const code = `/** @internal */
