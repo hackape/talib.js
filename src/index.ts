@@ -8,19 +8,74 @@ const API: any = {"ACCBANDS":{"name":"ACCBANDS","camelCaseName":"accBands","grou
 // initialize wasm module
 
 /** @internal */
-var __INIT__: (m: any) => Promise<any> = __INIT__;
+declare var __INIT__: (m: any) => Promise<IWasmModule>;
+
+/** @interal */
+const enum ByteSize {
+  i8 = 1,
+  i16 = 2,
+  i32 = 4,
+  i64 = 8,
+  float = 4,
+  double = 8,
+}
 
 /** @internal */
-let TA_WASM: any;
+type IWasmCTypes = 'i1' | 'i8' | 'i16' | 'i32' | 'i64' | 'float' | 'double';
 
 /** @internal */
-function cArray(Module: any, size: number) {
-  const offset = Module._malloc(size * 8);
-  Module.HEAPF64.set(new Float64Array(size), offset / 8);
+interface IWasmModule {
+  _malloc(size: number): number;
+  _free(offset: number): void;
+  HEAP8: Int8Array;
+  HEAP16: Int16Array;
+  HEAP32: Int32Array;
+  HEAPU8: Uint8Array;
+  HEAPU16: Uint16Array;
+  HEAPU32: Uint32Array;
+  HEAPF32: Float32Array;
+  HEAPF64: Float64Array;
+  ccall(
+    funcIdent: string,
+    retCodeType: string,
+    argTypes: any[],
+    args: any[]
+  ): number;
+  setValue(ptr: number, value: number, type: IWasmCTypes): void;
+  getValue(ptr: number, type: IWasmCTypes): number;
+}
+
+/** @internal */
+let Module: IWasmModule;
+
+/** @internal */
+function double_array(size: number) {
+  const BYTE_SIZE = ByteSize.double;
+  const offset = Module._malloc(size * BYTE_SIZE);
+  const offsetF64 = offset / BYTE_SIZE;
+  Module.HEAPF64.set(new Float64Array(size), offsetF64);
   return {
-    data: Module.HEAPF64.subarray(offset / 8, offset / 8 + size),
-    offset: offset,
+    data: Module.HEAPF64.subarray(offsetF64, offsetF64 + size),
+    pointer: offset,
   };
+}
+
+/** @internal */
+function c_pointer(type: IWasmCTypes, initValue?: number) {
+  const offset = Module._malloc(ByteSize.i32);
+  const ref = {
+    get data() {
+      return Module.getValue(offset, type);
+    },
+    set data(val: number) {
+      Module.setValue(offset, val, type);
+    },
+    pointer: offset,
+  };
+  if (initValue !== undefined) {
+    ref.data = initValue;
+  }
+  return ref;
 }
 
 /** @internal */
@@ -45,6 +100,10 @@ const TA_RET_CODE = {
   5000: 'TA_INTERNAL_ERROR',
   [0xffff]: 'TA_UNKNOWN_ERR',
 };
+
+// src/ta-lib/include/ta_defs.h:213
+/** @internal */
+const TA_INTEGER_DEFAULT = -2147483648;
 
 /** @internal */
 type APIDescriptor = {
@@ -77,7 +136,7 @@ type APIDescriptor = {
 /** @internal */
 function callFunc(api: APIDescriptor, params: any): any {
   const funcIdent = `TA_${api.name}`;
-  if (!TA_WASM) throw Error(`${api.name}() called before initialization.`);
+  if (!Module) throw Error(`${api.name}() called before initialization.`);
 
   // prettier-ignore
   const ccallArgsLen =
@@ -87,7 +146,7 @@ function callFunc(api: APIDescriptor, params: any): any {
     2 /* outBegIdx, outNBElement */ + 
     api.outputs.length;
 
-  const argTypesToCcall = new Array(ccallArgsLen).fill('number');
+  const argTypes = new Array(ccallArgsLen).fill('number');
 
   /**
    * Input params validation
@@ -100,9 +159,9 @@ function callFunc(api: APIDescriptor, params: any): any {
     }
   }
 
-  for (const { name, defaultValue, range } of api.options) {
+  for (const { name, range } of api.options) {
     if (params[name] === undefined) {
-      params[name] = defaultValue;
+      params[name] = TA_INTEGER_DEFAULT;
     } else if (
       range &&
       (params[name] < range.min || params[name] > range.max)
@@ -122,50 +181,62 @@ function callFunc(api: APIDescriptor, params: any): any {
   }
 
   /**
-   * Constructing `argsToCcall` to pass to the `Module.ccall` API
-   * Move things from `params` onto `argsToCcall`
+   * Constructing `args` to pass to the `Module.ccall` API
+   * Move things from `params` onto `args`
    *
    * TA-Lib function signatures are of following form:
    * ```
    * FUNC(startIdx, endIdx, ...params, outBegIdx, outNBElement, ...outputs)
    * ```
    */
-  const argsToCcall = [startIdx, endIdx];
-  const arraysToRelease = [];
+  const args = [startIdx, endIdx];
+  const memToFree = [];
 
   api.inputs.forEach(({ name }) => {
-    const argArray = cArray(TA_WASM, endIdx - startIdx);
+    const argArray = double_array(endIdx - startIdx);
     /** @type {number[]} */
     const paramArray = params[name];
     for (const i in paramArray) argArray.data[i] = paramArray[i];
-    arraysToRelease.push(argArray);
-    argsToCcall.push(argArray.offset);
+    memToFree.push(argArray.pointer);
+    args.push(argArray.pointer);
   });
 
-  api.options.forEach(({ name }) => argsToCcall.push(params[name]));
+  api.options.forEach(({ name }) => args.push(params[name]));
 
-  argsToCcall.push(0); // outBegIdx
-  argsToCcall.push(0); // outNBElement
+  const outBegIdxRef = c_pointer('i32', 0);
+  const outNBElementRef = c_pointer('i32', 0);
+  memToFree.push(outBegIdxRef.pointer);
+  memToFree.push(outNBElementRef.pointer);
+  args.push(outBegIdxRef.pointer);
+  args.push(outNBElementRef.pointer);
 
   const outputs = api.outputs.map(({ name }) => {
-    const argArray = cArray(TA_WASM, endIdx - startIdx);
-    arraysToRelease.push(argArray);
-    argsToCcall.push(argArray.offset);
+    const argArray = double_array(endIdx - startIdx);
+    memToFree.push(argArray.pointer);
+    args.push(argArray.pointer);
     return { name, array: argArray };
   });
 
-  const retCode = TA_WASM.ccall(
+  const retCode = Module.ccall(
     funcIdent,
     'number' /* TA_RET_CODE */,
-    argTypesToCcall,
-    argsToCcall
+    argTypes,
+    args
   );
-  arraysToRelease.forEach((arr) => TA_WASM._free(arr.offset));
 
-  const result = outputs.reduce((result, current) => {
-    result[current.name] = Array.from(current.array.data);
-    return result;
-  }, {});
+  const outBegIdx = outBegIdxRef.data;
+  const outNBElement = outNBElementRef.data;
+
+  const result = outputs.reduce(
+    (result, current) => {
+      const data = Array.from(current.array.data.slice(0, outNBElement));
+      result[current.name] = data;
+      return result;
+    },
+    { outBegIdx, outNBElement }
+  );
+
+  memToFree.forEach((offset) => Module._free(offset));
 
   if (retCode === 0) {
     // success
@@ -228,8 +299,8 @@ export enum MAType {
  * @param wasmBinaryFilePath - optional, a string that specifies the location of wasm binary file
  * @returns A promise that resolves to the emscripten runtime `Module` object. See {@link https://emscripten.org/docs/api_reference/module.html}.
  */
-export function init(wasmBinaryFilePath?: string) {
-  if (TA_WASM) return Promise.resolve(TA_WASM);
+export function init(wasmBinaryFilePath?: string): Promise<IWasmModule> {
+  if (Module) return Promise.resolve(Module);
 
   if (wasmBinaryFilePath && typeof wasmBinaryFilePath !== 'string') {
     return Promise.reject(
@@ -241,7 +312,7 @@ export function init(wasmBinaryFilePath?: string) {
 
   const locateFile = wasmBinaryFilePath ? () => wasmBinaryFilePath : undefined;
   return __INIT__({ locateFile })
-    .then((Module) => (TA_WASM = Module))
+    .then((m) => (Module = m))
     .catch((e) => {
       let message = 'TA-Lib WASM runtime init fail.';
       if (e && e.message) {
@@ -271,7 +342,7 @@ export function ACCBANDS(params: {
    * @defaultValue 20
    */
   timePeriod?: number;
-}): { upperBand: number[]; middleBand: number[]; lowerBand: number[] } {
+}): { outBegIdx: number; outNBElement: number; upperBand: number[]; middleBand: number[]; lowerBand: number[]; } {
   return callFunc(__ACCBANDS_API__, params);
 }
 
@@ -288,7 +359,7 @@ let __ACOS_API__: any = API['ACOS'];
  */
 export function ACOS(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ACOS_API__, params);
 }
 
@@ -308,7 +379,7 @@ export function AD(params: {
   low: number[];
   close: number[];
   volume: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__AD_API__, params);
 }
 
@@ -326,7 +397,7 @@ let __ADD_API__: any = API['ADD'];
 export function ADD(params: {
   inReal0: number[];
   inReal1: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ADD_API__, params);
 }
 
@@ -358,7 +429,7 @@ export function ADOSC(params: {
    * @defaultValue 10
    */
   slowPeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ADOSC_API__, params);
 }
 
@@ -383,7 +454,7 @@ export function ADX(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ADX_API__, params);
 }
 
@@ -408,7 +479,7 @@ export function ADXR(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ADXR_API__, params);
 }
 
@@ -443,7 +514,7 @@ export function APO(params: {
    * @defaultValue `MAType.SMA`=0
    */
   MAType?: MAType;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__APO_API__, params);
 }
 
@@ -467,7 +538,7 @@ export function AROON(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { aroonDown: number[]; aroonUp: number[] } {
+}): { outBegIdx: number; outNBElement: number; aroonDown: number[]; aroonUp: number[]; } {
   return callFunc(__AROON_API__, params);
 }
 
@@ -491,7 +562,7 @@ export function AROONOSC(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__AROONOSC_API__, params);
 }
 
@@ -508,7 +579,7 @@ let __ASIN_API__: any = API['ASIN'];
  */
 export function ASIN(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ASIN_API__, params);
 }
 
@@ -525,7 +596,7 @@ let __ATAN_API__: any = API['ATAN'];
  */
 export function ATAN(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ATAN_API__, params);
 }
 
@@ -550,7 +621,7 @@ export function ATR(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ATR_API__, params);
 }
 
@@ -573,7 +644,7 @@ export function AVGDEV(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__AVGDEV_API__, params);
 }
 
@@ -593,7 +664,7 @@ export function AVGPRICE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__AVGPRICE_API__, params);
 }
 
@@ -634,7 +705,7 @@ export function BBANDS(params: {
    * @defaultValue `MAType.SMA`=0
    */
   MAType?: MAType;
-}): { upperBand: number[]; middleBand: number[]; lowerBand: number[] } {
+}): { outBegIdx: number; outNBElement: number; upperBand: number[]; middleBand: number[]; lowerBand: number[]; } {
   return callFunc(__BBANDS_API__, params);
 }
 
@@ -658,7 +729,7 @@ export function BETA(params: {
    * @defaultValue 5
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__BETA_API__, params);
 }
 
@@ -678,7 +749,7 @@ export function BOP(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__BOP_API__, params);
 }
 
@@ -703,7 +774,7 @@ export function CCI(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CCI_API__, params);
 }
 
@@ -723,7 +794,7 @@ export function CDL2CROWS(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDL2CROWS_API__, params);
 }
 
@@ -743,7 +814,7 @@ export function CDL3BLACKCROWS(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDL3BLACKCROWS_API__, params);
 }
 
@@ -763,7 +834,7 @@ export function CDL3INSIDE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDL3INSIDE_API__, params);
 }
 
@@ -783,7 +854,7 @@ export function CDL3LINESTRIKE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDL3LINESTRIKE_API__, params);
 }
 
@@ -803,7 +874,7 @@ export function CDL3OUTSIDE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDL3OUTSIDE_API__, params);
 }
 
@@ -823,7 +894,7 @@ export function CDL3STARSINSOUTH(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDL3STARSINSOUTH_API__, params);
 }
 
@@ -843,7 +914,7 @@ export function CDL3WHITESOLDIERS(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDL3WHITESOLDIERS_API__, params);
 }
 
@@ -869,7 +940,7 @@ export function CDLABANDONEDBABY(params: {
    * @defaultValue 0.3
    */
   penetration?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLABANDONEDBABY_API__, params);
 }
 
@@ -889,7 +960,7 @@ export function CDLADVANCEBLOCK(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLADVANCEBLOCK_API__, params);
 }
 
@@ -909,7 +980,7 @@ export function CDLBELTHOLD(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLBELTHOLD_API__, params);
 }
 
@@ -929,7 +1000,7 @@ export function CDLBREAKAWAY(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLBREAKAWAY_API__, params);
 }
 
@@ -949,7 +1020,7 @@ export function CDLCLOSINGMARUBOZU(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLCLOSINGMARUBOZU_API__, params);
 }
 
@@ -969,7 +1040,7 @@ export function CDLCONCEALBABYSWALL(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLCONCEALBABYSWALL_API__, params);
 }
 
@@ -989,7 +1060,7 @@ export function CDLCOUNTERATTACK(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLCOUNTERATTACK_API__, params);
 }
 
@@ -1015,7 +1086,7 @@ export function CDLDARKCLOUDCOVER(params: {
    * @defaultValue 0.5
    */
   penetration?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLDARKCLOUDCOVER_API__, params);
 }
 
@@ -1035,7 +1106,7 @@ export function CDLDOJI(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLDOJI_API__, params);
 }
 
@@ -1055,7 +1126,7 @@ export function CDLDOJISTAR(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLDOJISTAR_API__, params);
 }
 
@@ -1075,7 +1146,7 @@ export function CDLDRAGONFLYDOJI(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLDRAGONFLYDOJI_API__, params);
 }
 
@@ -1095,7 +1166,7 @@ export function CDLENGULFING(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLENGULFING_API__, params);
 }
 
@@ -1121,7 +1192,7 @@ export function CDLEVENINGDOJISTAR(params: {
    * @defaultValue 0.3
    */
   penetration?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLEVENINGDOJISTAR_API__, params);
 }
 
@@ -1147,7 +1218,7 @@ export function CDLEVENINGSTAR(params: {
    * @defaultValue 0.3
    */
   penetration?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLEVENINGSTAR_API__, params);
 }
 
@@ -1167,7 +1238,7 @@ export function CDLGAPSIDESIDEWHITE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLGAPSIDESIDEWHITE_API__, params);
 }
 
@@ -1187,7 +1258,7 @@ export function CDLGRAVESTONEDOJI(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLGRAVESTONEDOJI_API__, params);
 }
 
@@ -1207,7 +1278,7 @@ export function CDLHAMMER(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLHAMMER_API__, params);
 }
 
@@ -1227,7 +1298,7 @@ export function CDLHANGINGMAN(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLHANGINGMAN_API__, params);
 }
 
@@ -1247,7 +1318,7 @@ export function CDLHARAMI(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLHARAMI_API__, params);
 }
 
@@ -1267,7 +1338,7 @@ export function CDLHARAMICROSS(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLHARAMICROSS_API__, params);
 }
 
@@ -1287,7 +1358,7 @@ export function CDLHIGHWAVE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLHIGHWAVE_API__, params);
 }
 
@@ -1307,7 +1378,7 @@ export function CDLHIKKAKE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLHIKKAKE_API__, params);
 }
 
@@ -1327,7 +1398,7 @@ export function CDLHIKKAKEMOD(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLHIKKAKEMOD_API__, params);
 }
 
@@ -1347,7 +1418,7 @@ export function CDLHOMINGPIGEON(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLHOMINGPIGEON_API__, params);
 }
 
@@ -1367,7 +1438,7 @@ export function CDLIDENTICAL3CROWS(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLIDENTICAL3CROWS_API__, params);
 }
 
@@ -1387,7 +1458,7 @@ export function CDLINNECK(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLINNECK_API__, params);
 }
 
@@ -1407,7 +1478,7 @@ export function CDLINVERTEDHAMMER(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLINVERTEDHAMMER_API__, params);
 }
 
@@ -1427,7 +1498,7 @@ export function CDLKICKING(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLKICKING_API__, params);
 }
 
@@ -1447,7 +1518,7 @@ export function CDLKICKINGBYLENGTH(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLKICKINGBYLENGTH_API__, params);
 }
 
@@ -1467,7 +1538,7 @@ export function CDLLADDERBOTTOM(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLLADDERBOTTOM_API__, params);
 }
 
@@ -1487,7 +1558,7 @@ export function CDLLONGLEGGEDDOJI(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLLONGLEGGEDDOJI_API__, params);
 }
 
@@ -1507,7 +1578,7 @@ export function CDLLONGLINE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLLONGLINE_API__, params);
 }
 
@@ -1527,7 +1598,7 @@ export function CDLMARUBOZU(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLMARUBOZU_API__, params);
 }
 
@@ -1547,7 +1618,7 @@ export function CDLMATCHINGLOW(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLMATCHINGLOW_API__, params);
 }
 
@@ -1573,7 +1644,7 @@ export function CDLMATHOLD(params: {
    * @defaultValue 0.5
    */
   penetration?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLMATHOLD_API__, params);
 }
 
@@ -1599,7 +1670,7 @@ export function CDLMORNINGDOJISTAR(params: {
    * @defaultValue 0.3
    */
   penetration?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLMORNINGDOJISTAR_API__, params);
 }
 
@@ -1625,7 +1696,7 @@ export function CDLMORNINGSTAR(params: {
    * @defaultValue 0.3
    */
   penetration?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLMORNINGSTAR_API__, params);
 }
 
@@ -1645,7 +1716,7 @@ export function CDLONNECK(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLONNECK_API__, params);
 }
 
@@ -1665,7 +1736,7 @@ export function CDLPIERCING(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLPIERCING_API__, params);
 }
 
@@ -1685,7 +1756,7 @@ export function CDLRICKSHAWMAN(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLRICKSHAWMAN_API__, params);
 }
 
@@ -1705,7 +1776,7 @@ export function CDLRISEFALL3METHODS(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLRISEFALL3METHODS_API__, params);
 }
 
@@ -1725,7 +1796,7 @@ export function CDLSEPARATINGLINES(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLSEPARATINGLINES_API__, params);
 }
 
@@ -1745,7 +1816,7 @@ export function CDLSHOOTINGSTAR(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLSHOOTINGSTAR_API__, params);
 }
 
@@ -1765,7 +1836,7 @@ export function CDLSHORTLINE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLSHORTLINE_API__, params);
 }
 
@@ -1785,7 +1856,7 @@ export function CDLSPINNINGTOP(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLSPINNINGTOP_API__, params);
 }
 
@@ -1805,7 +1876,7 @@ export function CDLSTALLEDPATTERN(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLSTALLEDPATTERN_API__, params);
 }
 
@@ -1825,7 +1896,7 @@ export function CDLSTICKSANDWICH(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLSTICKSANDWICH_API__, params);
 }
 
@@ -1845,7 +1916,7 @@ export function CDLTAKURI(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLTAKURI_API__, params);
 }
 
@@ -1865,7 +1936,7 @@ export function CDLTASUKIGAP(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLTASUKIGAP_API__, params);
 }
 
@@ -1885,7 +1956,7 @@ export function CDLTHRUSTING(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLTHRUSTING_API__, params);
 }
 
@@ -1905,7 +1976,7 @@ export function CDLTRISTAR(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLTRISTAR_API__, params);
 }
 
@@ -1925,7 +1996,7 @@ export function CDLUNIQUE3RIVER(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLUNIQUE3RIVER_API__, params);
 }
 
@@ -1945,7 +2016,7 @@ export function CDLUPSIDEGAP2CROWS(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLUPSIDEGAP2CROWS_API__, params);
 }
 
@@ -1965,7 +2036,7 @@ export function CDLXSIDEGAP3METHODS(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CDLXSIDEGAP3METHODS_API__, params);
 }
 
@@ -1982,7 +2053,7 @@ let __CEIL_API__: any = API['CEIL'];
  */
 export function CEIL(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CEIL_API__, params);
 }
 
@@ -2005,7 +2076,7 @@ export function CMO(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CMO_API__, params);
 }
 
@@ -2029,7 +2100,7 @@ export function CORREL(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__CORREL_API__, params);
 }
 
@@ -2046,7 +2117,7 @@ let __COS_API__: any = API['COS'];
  */
 export function COS(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__COS_API__, params);
 }
 
@@ -2063,7 +2134,7 @@ let __COSH_API__: any = API['COSH'];
  */
 export function COSH(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__COSH_API__, params);
 }
 
@@ -2086,7 +2157,7 @@ export function DEMA(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__DEMA_API__, params);
 }
 
@@ -2104,7 +2175,7 @@ let __DIV_API__: any = API['DIV'];
 export function DIV(params: {
   inReal0: number[];
   inReal1: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__DIV_API__, params);
 }
 
@@ -2129,7 +2200,7 @@ export function DX(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__DX_API__, params);
 }
 
@@ -2152,7 +2223,7 @@ export function EMA(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__EMA_API__, params);
 }
 
@@ -2169,7 +2240,7 @@ let __EXP_API__: any = API['EXP'];
  */
 export function EXP(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__EXP_API__, params);
 }
 
@@ -2186,7 +2257,7 @@ let __FLOOR_API__: any = API['FLOOR'];
  */
 export function FLOOR(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__FLOOR_API__, params);
 }
 
@@ -2203,7 +2274,7 @@ let __HT_DCPERIOD_API__: any = API['HT_DCPERIOD'];
  */
 export function HT_DCPERIOD(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__HT_DCPERIOD_API__, params);
 }
 
@@ -2220,7 +2291,7 @@ let __HT_DCPHASE_API__: any = API['HT_DCPHASE'];
  */
 export function HT_DCPHASE(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__HT_DCPHASE_API__, params);
 }
 
@@ -2237,7 +2308,7 @@ let __HT_PHASOR_API__: any = API['HT_PHASOR'];
  */
 export function HT_PHASOR(params: {
   inReal: number[];
-}): { inPhase: number[]; quadrature: number[] } {
+}): { outBegIdx: number; outNBElement: number; inPhase: number[]; quadrature: number[]; } {
   return callFunc(__HT_PHASOR_API__, params);
 }
 
@@ -2254,7 +2325,7 @@ let __HT_SINE_API__: any = API['HT_SINE'];
  */
 export function HT_SINE(params: {
   inReal: number[];
-}): { sine: number[]; leadSine: number[] } {
+}): { outBegIdx: number; outNBElement: number; sine: number[]; leadSine: number[]; } {
   return callFunc(__HT_SINE_API__, params);
 }
 
@@ -2271,7 +2342,7 @@ let __HT_TRENDLINE_API__: any = API['HT_TRENDLINE'];
  */
 export function HT_TRENDLINE(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__HT_TRENDLINE_API__, params);
 }
 
@@ -2288,7 +2359,7 @@ let __HT_TRENDMODE_API__: any = API['HT_TRENDMODE'];
  */
 export function HT_TRENDMODE(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__HT_TRENDMODE_API__, params);
 }
 
@@ -2312,7 +2383,7 @@ export function IMI(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__IMI_API__, params);
 }
 
@@ -2335,7 +2406,7 @@ export function KAMA(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__KAMA_API__, params);
 }
 
@@ -2358,7 +2429,7 @@ export function LINEARREG(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__LINEARREG_API__, params);
 }
 
@@ -2381,7 +2452,7 @@ export function LINEARREG_ANGLE(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__LINEARREG_ANGLE_API__, params);
 }
 
@@ -2404,7 +2475,7 @@ export function LINEARREG_INTERCEPT(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__LINEARREG_INTERCEPT_API__, params);
 }
 
@@ -2427,7 +2498,7 @@ export function LINEARREG_SLOPE(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__LINEARREG_SLOPE_API__, params);
 }
 
@@ -2444,7 +2515,7 @@ let __LN_API__: any = API['LN'];
  */
 export function LN(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__LN_API__, params);
 }
 
@@ -2461,7 +2532,7 @@ let __LOG10_API__: any = API['LOG10'];
  */
 export function LOG10(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__LOG10_API__, params);
 }
 
@@ -2490,7 +2561,7 @@ export function MA(params: {
    * @defaultValue `MAType.SMA`=0
    */
   MAType?: MAType;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MA_API__, params);
 }
 
@@ -2525,7 +2596,7 @@ export function MACD(params: {
    * @defaultValue 9
    */
   signalPeriod?: number;
-}): { MACD: number[]; MACDSignal: number[]; MACDHist: number[] } {
+}): { outBegIdx: number; outNBElement: number; MACD: number[]; MACDSignal: number[]; MACDHist: number[]; } {
   return callFunc(__MACD_API__, params);
 }
 
@@ -2578,7 +2649,7 @@ export function MACDEXT(params: {
    * @defaultValue `MAType.SMA`=0
    */
   signalMAType?: MAType;
-}): { MACD: number[]; MACDSignal: number[]; MACDHist: number[] } {
+}): { outBegIdx: number; outNBElement: number; MACD: number[]; MACDSignal: number[]; MACDHist: number[]; } {
   return callFunc(__MACDEXT_API__, params);
 }
 
@@ -2601,7 +2672,7 @@ export function MACDFIX(params: {
    * @defaultValue 9
    */
   signalPeriod?: number;
-}): { MACD: number[]; MACDSignal: number[]; MACDHist: number[] } {
+}): { outBegIdx: number; outNBElement: number; MACD: number[]; MACDSignal: number[]; MACDHist: number[]; } {
   return callFunc(__MACDFIX_API__, params);
 }
 
@@ -2630,7 +2701,7 @@ export function MAMA(params: {
    * @defaultValue 0.05
    */
   slowLimit?: number;
-}): { MAMA: number[]; FAMA: number[] } {
+}): { outBegIdx: number; outNBElement: number; MAMA: number[]; FAMA: number[]; } {
   return callFunc(__MAMA_API__, params);
 }
 
@@ -2666,7 +2737,7 @@ export function MAVP(params: {
    * @defaultValue `MAType.SMA`=0
    */
   MAType?: MAType;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MAVP_API__, params);
 }
 
@@ -2689,7 +2760,7 @@ export function MAX(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MAX_API__, params);
 }
 
@@ -2712,7 +2783,7 @@ export function MAXINDEX(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MAXINDEX_API__, params);
 }
 
@@ -2730,7 +2801,7 @@ let __MEDPRICE_API__: any = API['MEDPRICE'];
 export function MEDPRICE(params: {
   high: number[];
   low: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MEDPRICE_API__, params);
 }
 
@@ -2756,7 +2827,7 @@ export function MFI(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MFI_API__, params);
 }
 
@@ -2779,7 +2850,7 @@ export function MIDPOINT(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MIDPOINT_API__, params);
 }
 
@@ -2803,7 +2874,7 @@ export function MIDPRICE(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MIDPRICE_API__, params);
 }
 
@@ -2826,7 +2897,7 @@ export function MIN(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MIN_API__, params);
 }
 
@@ -2849,7 +2920,7 @@ export function MININDEX(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MININDEX_API__, params);
 }
 
@@ -2872,7 +2943,7 @@ export function MINMAX(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { min: number[]; max: number[] } {
+}): { outBegIdx: number; outNBElement: number; min: number[]; max: number[]; } {
   return callFunc(__MINMAX_API__, params);
 }
 
@@ -2895,7 +2966,7 @@ export function MINMAXINDEX(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { minIdx: number[]; maxIdx: number[] } {
+}): { outBegIdx: number; outNBElement: number; minIdx: number[]; maxIdx: number[]; } {
   return callFunc(__MINMAXINDEX_API__, params);
 }
 
@@ -2920,7 +2991,7 @@ export function MINUS_DI(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MINUS_DI_API__, params);
 }
 
@@ -2944,7 +3015,7 @@ export function MINUS_DM(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MINUS_DM_API__, params);
 }
 
@@ -2967,7 +3038,7 @@ export function MOM(params: {
    * @defaultValue 10
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MOM_API__, params);
 }
 
@@ -2985,7 +3056,7 @@ let __MULT_API__: any = API['MULT'];
 export function MULT(params: {
   inReal0: number[];
   inReal1: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__MULT_API__, params);
 }
 
@@ -3010,7 +3081,7 @@ export function NATR(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__NATR_API__, params);
 }
 
@@ -3028,7 +3099,7 @@ let __OBV_API__: any = API['OBV'];
 export function OBV(params: {
   inReal: number[];
   volume: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__OBV_API__, params);
 }
 
@@ -3053,7 +3124,7 @@ export function PLUS_DI(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__PLUS_DI_API__, params);
 }
 
@@ -3077,7 +3148,7 @@ export function PLUS_DM(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__PLUS_DM_API__, params);
 }
 
@@ -3112,7 +3183,7 @@ export function PPO(params: {
    * @defaultValue `MAType.SMA`=0
    */
   MAType?: MAType;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__PPO_API__, params);
 }
 
@@ -3135,7 +3206,7 @@ export function ROC(params: {
    * @defaultValue 10
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ROC_API__, params);
 }
 
@@ -3158,7 +3229,7 @@ export function ROCP(params: {
    * @defaultValue 10
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ROCP_API__, params);
 }
 
@@ -3181,7 +3252,7 @@ export function ROCR(params: {
    * @defaultValue 10
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ROCR_API__, params);
 }
 
@@ -3204,7 +3275,7 @@ export function ROCR100(params: {
    * @defaultValue 10
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ROCR100_API__, params);
 }
 
@@ -3227,7 +3298,7 @@ export function RSI(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__RSI_API__, params);
 }
 
@@ -3257,7 +3328,7 @@ export function SAR(params: {
    * @defaultValue 0.2
    */
   maximum?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__SAR_API__, params);
 }
 
@@ -3323,7 +3394,7 @@ export function SAREXT(params: {
    * @defaultValue 0.2
    */
   accelerationMaxShort?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__SAREXT_API__, params);
 }
 
@@ -3340,7 +3411,7 @@ let __SIN_API__: any = API['SIN'];
  */
 export function SIN(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__SIN_API__, params);
 }
 
@@ -3357,7 +3428,7 @@ let __SINH_API__: any = API['SINH'];
  */
 export function SINH(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__SINH_API__, params);
 }
 
@@ -3380,7 +3451,7 @@ export function SMA(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__SMA_API__, params);
 }
 
@@ -3397,7 +3468,7 @@ let __SQRT_API__: any = API['SQRT'];
  */
 export function SQRT(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__SQRT_API__, params);
 }
 
@@ -3426,7 +3497,7 @@ export function STDDEV(params: {
    * @defaultValue 1
    */
   nbDev?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__STDDEV_API__, params);
 }
 
@@ -3475,7 +3546,7 @@ export function STOCH(params: {
    * @defaultValue `MAType.SMA`=0
    */
   slowD_MAType?: MAType;
-}): { slowK: number[]; slowD: number[] } {
+}): { outBegIdx: number; outNBElement: number; slowK: number[]; slowD: number[]; } {
   return callFunc(__STOCH_API__, params);
 }
 
@@ -3512,7 +3583,7 @@ export function STOCHF(params: {
    * @defaultValue `MAType.SMA`=0
    */
   fastD_MAType?: MAType;
-}): { fastK: number[]; fastD: number[] } {
+}): { outBegIdx: number; outNBElement: number; fastK: number[]; fastD: number[]; } {
   return callFunc(__STOCHF_API__, params);
 }
 
@@ -3553,7 +3624,7 @@ export function STOCHRSI(params: {
    * @defaultValue `MAType.SMA`=0
    */
   fastD_MAType?: MAType;
-}): { fastK: number[]; fastD: number[] } {
+}): { outBegIdx: number; outNBElement: number; fastK: number[]; fastD: number[]; } {
   return callFunc(__STOCHRSI_API__, params);
 }
 
@@ -3571,7 +3642,7 @@ let __SUB_API__: any = API['SUB'];
 export function SUB(params: {
   inReal0: number[];
   inReal1: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__SUB_API__, params);
 }
 
@@ -3594,7 +3665,7 @@ export function SUM(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__SUM_API__, params);
 }
 
@@ -3623,7 +3694,7 @@ export function T3(params: {
    * @defaultValue 0.7
    */
   VFactor?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__T3_API__, params);
 }
 
@@ -3640,7 +3711,7 @@ let __TAN_API__: any = API['TAN'];
  */
 export function TAN(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__TAN_API__, params);
 }
 
@@ -3657,7 +3728,7 @@ let __TANH_API__: any = API['TANH'];
  */
 export function TANH(params: {
   inReal: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__TANH_API__, params);
 }
 
@@ -3680,7 +3751,7 @@ export function TEMA(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__TEMA_API__, params);
 }
 
@@ -3699,7 +3770,7 @@ export function TRANGE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__TRANGE_API__, params);
 }
 
@@ -3722,7 +3793,7 @@ export function TRIMA(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__TRIMA_API__, params);
 }
 
@@ -3745,7 +3816,7 @@ export function TRIX(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__TRIX_API__, params);
 }
 
@@ -3768,7 +3839,7 @@ export function TSF(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__TSF_API__, params);
 }
 
@@ -3787,7 +3858,7 @@ export function TYPPRICE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__TYPPRICE_API__, params);
 }
 
@@ -3824,7 +3895,7 @@ export function ULTOSC(params: {
    * @defaultValue 28
    */
   timePeriod3?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__ULTOSC_API__, params);
 }
 
@@ -3853,7 +3924,7 @@ export function VAR(params: {
    * @defaultValue 1
    */
   nbDev?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__VAR_API__, params);
 }
 
@@ -3872,7 +3943,7 @@ export function WCLPRICE(params: {
   high: number[];
   low: number[];
   close: number[];
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__WCLPRICE_API__, params);
 }
 
@@ -3897,7 +3968,7 @@ export function WILLR(params: {
    * @defaultValue 14
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__WILLR_API__, params);
 }
 
@@ -3920,7 +3991,7 @@ export function WMA(params: {
    * @defaultValue 30
    */
   timePeriod?: number;
-}): { output: number[] } {
+}): { outBegIdx: number; outNBElement: number; output: number[]; } {
   return callFunc(__WMA_API__, params);
 }
 
